@@ -1,0 +1,52 @@
+cors:
+  allowed-origins: "http://localhost:5173,http://localhost:3000,http://localhost:5000"
+
+cloudfront:
+  url: ""
+
+spring:
+  config:
+    import: optional:classpath:application-local.yml
+  datasource:
+    url: jdbc:mysql://localhost:3306/drive_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: ""
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: 8080
+
+jwt:
+  secret: ""
+  expiration: 86400000
+
+aws:
+  region: ap-south-1
+  s3:
+    bucket: ""
+  credentials:
+    access-key: ""
+    secret-key: ""
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.drive: INFO
+    software.amazon.awssdk: WARN
+    org.hibernate.SQL: WARN
