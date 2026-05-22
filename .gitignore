@@ -56,6 +56,7 @@ config.ini
 .claude
 .vscode
 *.md
+!README.md
 
 # Local secrets — never commit
 **/application-local.yml
