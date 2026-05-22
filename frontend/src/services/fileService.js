@@ -29,6 +29,10 @@ export const fileService = {
     return res.data.url
   },
 
+  async confirmUpload(fileMetadataId) {
+    await api.post(`/files/${fileMetadataId}/confirm`)
+  },
+
   async deleteFile(fileId) {
     await api.delete(`/files/${fileId}`)
   },

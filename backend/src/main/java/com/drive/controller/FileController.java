@@ -60,6 +60,15 @@ public class FileController {
         return ResponseEntity.ok(Map.of("url", url, "linkType", linkType));
     }
 
+    @PostMapping("/{id}/confirm")
+    @Operation(summary = "Confirm that the S3 upload completed — marks the file as available")
+    public ResponseEntity<Void> confirmUpload(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @PathVariable Long id) {
+        fileService.confirmUpload(userDetails.getUsername(), id);
+        return ResponseEntity.ok().build();
+    }
+
     @DeleteMapping("/{id}")
     @Operation(summary = "Delete a file from S3 and the database")
     public ResponseEntity<Void> deleteFile(

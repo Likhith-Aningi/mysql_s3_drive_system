@@ -1,5 +1,6 @@
 package com.drive.controller;
 
+import com.drive.config.SecurityConfig;
 import com.drive.dto.AuthRequest;
 import com.drive.dto.AuthResponse;
 import com.drive.dto.RegisterRequest;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -15,17 +17,18 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @WebMvcTest(AuthController.class)
+@Import(SecurityConfig.class)
 class AuthControllerTest {
 
     @Autowired MockMvc mockMvc;
-    @Autowired ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     @MockitoBean AuthService authService;
     @MockitoBean com.drive.security.JwtUtil jwtUtil;
-    @MockitoBean com.drive.security.JwtAuthFilter jwtAuthFilter;
     @MockitoBean org.springframework.security.core.userdetails.UserDetailsService userDetailsService;
 
     @Test
@@ -38,6 +41,7 @@ class AuthControllerTest {
         when(authService.register(any())).thenReturn(new AuthResponse("token", "alice@example.com", "Alice"));
 
         mockMvc.perform(post("/api/auth/register")
+                .with(csrf())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isCreated())
@@ -53,6 +57,7 @@ class AuthControllerTest {
         req.setPassword("password123");
 
         mockMvc.perform(post("/api/auth/register")
+                .with(csrf())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isBadRequest());
@@ -67,6 +72,7 @@ class AuthControllerTest {
         when(authService.login(any())).thenReturn(new AuthResponse("token", "alice@example.com", "Alice"));
 
         mockMvc.perform(post("/api/auth/login")
+                .with(csrf())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isOk())
@@ -82,6 +88,7 @@ class AuthControllerTest {
         when(authService.login(any())).thenThrow(new BadCredentialsException("Bad credentials"));
 
         mockMvc.perform(post("/api/auth/login")
+                .with(csrf())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(req)))
                 .andExpect(status().isUnauthorized());

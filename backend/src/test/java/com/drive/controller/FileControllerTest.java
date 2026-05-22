@@ -29,10 +29,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class FileControllerTest {
 
     @Autowired MockMvc mockMvc;
-    @Autowired ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     @MockitoBean FileService fileService;
     @MockitoBean com.drive.security.JwtUtil jwtUtil;
-    @MockitoBean com.drive.security.JwtAuthFilter jwtAuthFilter;
     @MockitoBean org.springframework.security.core.userdetails.UserDetailsService userDetailsService;
 
     @Test
@@ -118,6 +117,35 @@ class FileControllerTest {
 
         mockMvc.perform(delete("/api/files/99").with(csrf()))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void confirmUpload_success() throws Exception {
+        doNothing().when(fileService).confirmUpload("alice@example.com", 1L);
+
+        mockMvc.perform(post("/api/files/1/confirm").with(csrf()))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void confirmUpload_fileNotFound_returns404() throws Exception {
+        doThrow(new NoSuchElementException("File not found"))
+                .when(fileService).confirmUpload("alice@example.com", 99L);
+
+        mockMvc.perform(post("/api/files/99/confirm").with(csrf()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void confirmUpload_notInS3_returns400() throws Exception {
+        doThrow(new IllegalStateException("File not found in S3"))
+                .when(fileService).confirmUpload("alice@example.com", 1L);
+
+        mockMvc.perform(post("/api/files/1/confirm").with(csrf()))
+                .andExpect(status().isBadRequest());
     }
 
     @Test

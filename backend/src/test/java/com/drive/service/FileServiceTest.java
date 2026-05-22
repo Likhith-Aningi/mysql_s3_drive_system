@@ -4,15 +4,18 @@ import com.drive.dto.FileMetadataDto;
 import com.drive.dto.PresignedUploadRequest;
 import com.drive.dto.PresignedUploadResponse;
 import com.drive.entity.FileMetadata;
+import com.drive.entity.UploadStatus;
 import com.drive.entity.User;
 import com.drive.repository.FileRepository;
 import com.drive.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -38,6 +41,7 @@ class FileServiceTest {
 
     @BeforeEach
     void setUp() {
+        ReflectionTestUtils.setField(fileService, "cloudfrontBaseUrl", "");
         user = User.builder().id(1L).email("alice@example.com").name("Alice").build();
         file = FileMetadata.builder()
                 .id(10L)
@@ -45,6 +49,7 @@ class FileServiceTest {
                 .s3Key("users/1/uuid/test.pdf")
                 .contentType("application/pdf")
                 .fileSize(1024L)
+                .uploadStatus(UploadStatus.COMPLETED)
                 .owner(user)
                 .uploadedAt(LocalDateTime.now())
                 .build();
@@ -65,12 +70,61 @@ class FileServiceTest {
 
         assertThat(response.getUploadUrl()).isEqualTo("https://s3.presigned.url");
         assertThat(response.getFileMetadataId()).isEqualTo(10L);
+
+        ArgumentCaptor<FileMetadata> captor = ArgumentCaptor.forClass(FileMetadata.class);
+        verify(fileRepository).save(captor.capture());
+        assertThat(captor.getValue().getUploadStatus()).isEqualTo(UploadStatus.PENDING);
+    }
+
+    @Test
+    void confirmUpload_success() {
+        FileMetadata pendingFile = FileMetadata.builder()
+                .id(10L).originalName("test.pdf").s3Key("users/1/uuid/test.pdf")
+                .contentType("application/pdf").fileSize(1024L)
+                .uploadStatus(UploadStatus.PENDING).owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(pendingFile));
+        when(s3Service.objectExists("users/1/uuid/test.pdf")).thenReturn(true);
+        when(fileRepository.save(any())).thenReturn(pendingFile);
+
+        fileService.confirmUpload("alice@example.com", 10L);
+
+        ArgumentCaptor<FileMetadata> captor = ArgumentCaptor.forClass(FileMetadata.class);
+        verify(fileRepository).save(captor.capture());
+        assertThat(captor.getValue().getUploadStatus()).isEqualTo(UploadStatus.COMPLETED);
+    }
+
+    @Test
+    void confirmUpload_fileNotInS3_throws() {
+        FileMetadata pendingFile = FileMetadata.builder()
+                .id(10L).originalName("test.pdf").s3Key("users/1/uuid/test.pdf")
+                .contentType("application/pdf").fileSize(1024L)
+                .uploadStatus(UploadStatus.PENDING).owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(pendingFile));
+        when(s3Service.objectExists("users/1/uuid/test.pdf")).thenReturn(false);
+
+        assertThatThrownBy(() -> fileService.confirmUpload("alice@example.com", 10L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("S3");
+    }
+
+    @Test
+    void confirmUpload_fileNotFound_throws() {
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(99L, 1L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> fileService.confirmUpload("alice@example.com", 99L))
+                .isInstanceOf(NoSuchElementException.class);
     }
 
     @Test
     void listFiles_returnsFilesForOwner() {
         when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
-        when(fileRepository.findByOwnerIdOrderByUploadedAtDesc(1L)).thenReturn(List.of(file));
+        when(fileRepository.findByOwnerIdAndUploadStatusOrderByUploadedAtDesc(1L, UploadStatus.COMPLETED))
+                .thenReturn(List.of(file));
 
         List<FileMetadataDto> files = fileService.listFiles("alice@example.com");
 
@@ -87,6 +141,16 @@ class FileServiceTest {
         String url = fileService.getDownloadUrl("alice@example.com", 10L);
 
         assertThat(url).isEqualTo("https://download.url");
+    }
+
+    @Test
+    void getDownloadUrl_pendingFile_throws() {
+        file.setUploadStatus(UploadStatus.PENDING);
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(file));
+
+        assertThatThrownBy(() -> fileService.getDownloadUrl("alice@example.com", 10L))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test
@@ -122,6 +186,18 @@ class FileServiceTest {
 
     @Test
     void deleteFile_success() {
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(file));
+
+        fileService.deleteFile("alice@example.com", 10L);
+
+        verify(s3Service).deleteObject(file.getS3Key());
+        verify(fileRepository).delete(file);
+    }
+
+    @Test
+    void deleteFile_pendingFile_succeeds() {
+        file.setUploadStatus(UploadStatus.PENDING);
         when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
         when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(file));
 

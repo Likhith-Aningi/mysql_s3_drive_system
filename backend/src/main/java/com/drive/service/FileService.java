@@ -4,6 +4,7 @@ import com.drive.dto.FileMetadataDto;
 import com.drive.dto.PresignedUploadRequest;
 import com.drive.dto.PresignedUploadResponse;
 import com.drive.entity.FileMetadata;
+import com.drive.entity.UploadStatus;
 import com.drive.entity.User;
 import com.drive.repository.FileRepository;
 import com.drive.repository.UserRepository;
@@ -50,10 +51,26 @@ public class FileService {
         return new PresignedUploadResponse(uploadUrl, s3Key, saved.getId());
     }
 
+    @Transactional
+    public void confirmUpload(String userEmail, Long fileId) {
+        User owner = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new NoSuchElementException("User not found"));
+        FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
+                .orElseThrow(() -> new NoSuchElementException("File not found"));
+        if (file.getUploadStatus() == UploadStatus.COMPLETED) {
+            throw new IllegalStateException("Upload already confirmed");
+        }
+        if (!s3Service.objectExists(file.getS3Key())) {
+            throw new IllegalStateException("File not found in S3 — upload may have failed");
+        }
+        file.setUploadStatus(UploadStatus.COMPLETED);
+        fileRepository.save(file);
+    }
+
     public List<FileMetadataDto> listFiles(String userEmail) {
         User owner = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new NoSuchElementException("User not found"));
-        return fileRepository.findByOwnerIdOrderByUploadedAtDesc(owner.getId())
+        return fileRepository.findByOwnerIdAndUploadStatusOrderByUploadedAtDesc(owner.getId(), UploadStatus.COMPLETED)
                 .stream()
                 .map(this::toDto)
                 .toList();
@@ -64,6 +81,9 @@ public class FileService {
                 .orElseThrow(() -> new NoSuchElementException("User not found"));
         FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
                 .orElseThrow(() -> new NoSuchElementException("File not found"));
+        if (file.getUploadStatus() != UploadStatus.COMPLETED) {
+            throw new IllegalStateException("File upload has not been confirmed");
+        }
         if (file.getCloudfrontUrl() != null && !file.getCloudfrontUrl().isBlank()) {
             return file.getCloudfrontUrl();
         }
@@ -76,6 +96,9 @@ public class FileService {
                 .orElseThrow(() -> new NoSuchElementException("User not found"));
         FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
                 .orElseThrow(() -> new NoSuchElementException("File not found"));
+        if (file.getUploadStatus() != UploadStatus.COMPLETED) {
+            throw new IllegalStateException("File upload has not been confirmed");
+        }
         if ("permanent".equalsIgnoreCase(linkType)) {
             if (file.getCloudfrontUrl() == null || file.getCloudfrontUrl().isBlank()) {
                 throw new IllegalStateException("No CloudFront URL available for this file");

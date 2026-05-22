@@ -23,22 +23,42 @@ export default function UploadModal({ onClose, onSuccess }) {
     addFiles(e.dataTransfer.files)
   }
 
+  const classifyUploadError = (err) => {
+    if (!err?.response) return 'Network error — check your connection and try again'
+    const status = err.response.status
+    if (status === 403) return 'Upload link expired — please try again'
+    if (status === 413) return 'File is too large'
+    if (status === 400) return 'Invalid request — check file name and type'
+    return `Upload failed (error ${status})`
+  }
+
   const handleUpload = async () => {
     if (!files.length) return
     setUploading(true)
     const newResults = []
 
     for (const file of files) {
+      let fileMetadataId = null
       try {
-        const { uploadUrl } = await fileService.initiateUpload(
+        const { uploadUrl, fileMetadataId: id } = await fileService.initiateUpload(
           file.name,
           file.type || 'application/octet-stream',
           file.size
         )
+        fileMetadataId = id
+
         await fileService.uploadToS3(uploadUrl, file)
+
+        try {
+          await fileService.confirmUpload(fileMetadataId)
+        } catch {
+          newResults.push({ name: file.name, success: false, reason: 'Upload may not have completed — it will be cleaned up automatically' })
+          continue
+        }
+
         newResults.push({ name: file.name, success: true })
-      } catch {
-        newResults.push({ name: file.name, success: false })
+      } catch (err) {
+        newResults.push({ name: file.name, success: false, reason: classifyUploadError(err) })
       }
     }
 
@@ -110,13 +130,18 @@ export default function UploadModal({ onClose, onSuccess }) {
           ) : (
             <ul className="space-y-2">
               {results.map((r, i) => (
-                <li key={i} className="flex items-center gap-2 text-sm">
+                <li key={i} className="flex items-start gap-2 text-sm">
                   {r.success ? (
-                    <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+                    <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0 mt-0.5" />
                   ) : (
-                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                    <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
                   )}
-                  <span className={r.success ? 'text-gray-700 dark:text-gray-200' : 'text-red-600 dark:text-red-400'}>{r.name}</span>
+                  <div>
+                    <span className={r.success ? 'text-gray-700 dark:text-gray-200' : 'text-red-600 dark:text-red-400'}>{r.name}</span>
+                    {!r.success && r.reason && (
+                      <p className="text-xs text-red-400 dark:text-red-500 mt-0.5">{r.reason}</p>
+                    )}
+                  </div>
                 </li>
               ))}
             </ul>

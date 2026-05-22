@@ -34,6 +34,11 @@ public class FileMetadata {
     @Column
     private String cloudfrontUrl;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20, columnDefinition = "VARCHAR(20) DEFAULT 'PENDING'")
+    @Builder.Default
+    private UploadStatus uploadStatus = UploadStatus.PENDING;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "owner_id", nullable = false)
     private User owner;
