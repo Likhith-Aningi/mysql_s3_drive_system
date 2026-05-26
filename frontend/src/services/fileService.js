@@ -13,9 +13,10 @@ export const fileService = {
   },
 
   // File goes directly to S3 — never touches our backend
-  async uploadToS3(uploadUrl, file) {
+  async uploadToS3(uploadUrl, file, onUploadProgress) {
     await axios.put(uploadUrl, file, {
       headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      onUploadProgress,
     })
   },
 

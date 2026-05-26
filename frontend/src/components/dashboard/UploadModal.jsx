@@ -6,6 +6,7 @@ export default function UploadModal({ onClose, onSuccess }) {
   const [dragOver, setDragOver] = useState(false)
   const [files, setFiles] = useState([])
   const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState([])
   const [results, setResults] = useState([])
   const inputRef = useRef()
 
@@ -23,6 +24,9 @@ export default function UploadModal({ onClose, onSuccess }) {
     addFiles(e.dataTransfer.files)
   }
 
+  const updateProgress = (index, patch) =>
+    setProgress((prev) => prev.map((p, i) => (i === index ? { ...p, ...patch } : p)))
+
   const classifyUploadError = (err) => {
     if (!err?.response) return 'Network error — check your connection and try again'
     const status = err.response.status
@@ -35,9 +39,12 @@ export default function UploadModal({ onClose, onSuccess }) {
   const handleUpload = async () => {
     if (!files.length) return
     setUploading(true)
+    setProgress(files.map((f) => ({ loaded: 0, total: f.size, phase: 'waiting' })))
     const newResults = []
 
-    for (const file of files) {
+    for (let idx = 0; idx < files.length; idx++) {
+      const file = files[idx]
+      updateProgress(idx, { phase: 'uploading' })
       let fileMetadataId = null
       try {
         const { uploadUrl, fileMetadataId: id } = await fileService.initiateUpload(
@@ -47,17 +54,24 @@ export default function UploadModal({ onClose, onSuccess }) {
         )
         fileMetadataId = id
 
-        await fileService.uploadToS3(uploadUrl, file)
+        await fileService.uploadToS3(uploadUrl, file, (e) => {
+          updateProgress(idx, { loaded: e.loaded, total: e.total || file.size })
+        })
+
+        updateProgress(idx, { loaded: file.size, total: file.size, phase: 'confirming' })
 
         try {
           await fileService.confirmUpload(fileMetadataId)
         } catch {
+          updateProgress(idx, { phase: 'error' })
           newResults.push({ name: file.name, success: false, reason: 'Upload may not have completed — it will be cleaned up automatically' })
           continue
         }
 
+        updateProgress(idx, { phase: 'done' })
         newResults.push({ name: file.name, success: true })
       } catch (err) {
+        updateProgress(idx, { phase: 'error' })
         newResults.push({ name: file.name, success: false, reason: classifyUploadError(err) })
       }
     }
@@ -76,14 +90,45 @@ export default function UploadModal({ onClose, onSuccess }) {
           <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-100">Upload files</h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+            disabled={uploading}
+            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <div className="p-5 space-y-4">
-          {results.length === 0 ? (
+          {uploading ? (
+            <ul className="space-y-3">
+              {files.map((f, i) => {
+                const p = progress[i] ?? { loaded: 0, total: f.size, phase: 'waiting' }
+                const pct = p.total > 0 ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
+                const done = p.phase === 'done'
+                const error = p.phase === 'error'
+                const confirming = p.phase === 'confirming'
+                return (
+                  <li key={i} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-sm">
+                      <span className="truncate text-gray-700 dark:text-gray-200 flex-1">{f.name}</span>
+                      <span className={`flex-shrink-0 text-xs font-medium tabular-nums ${
+                        done ? 'text-green-500' : error ? 'text-red-500' : 'text-gray-400 dark:text-gray-500'
+                      }`}>
+                        {done ? 'Done' : error ? 'Failed' : confirming ? 'Saving…' : `${pct}%`}
+                      </span>
+                    </div>
+                    <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-150 ${
+                          done ? 'bg-green-500' : error ? 'bg-red-500' : 'bg-blue-500'
+                        }`}
+                        style={{ width: `${done || confirming ? 100 : pct}%` }}
+                      />
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          ) : results.length === 0 ? (
             <>
               <div
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
@@ -148,7 +193,7 @@ export default function UploadModal({ onClose, onSuccess }) {
           )}
         </div>
 
-        {results.length === 0 && (
+        {!uploading && results.length === 0 && (
           <div className="px-5 pb-5 flex gap-2">
             <button
               onClick={onClose}
@@ -158,20 +203,11 @@ export default function UploadModal({ onClose, onSuccess }) {
             </button>
             <button
               onClick={handleUpload}
-              disabled={!files.length || uploading}
+              disabled={!files.length}
               className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
             >
-              {uploading ? (
-                <>
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
-                  Uploading...
-                </>
-              ) : (
-                <>
-                  <Upload className="w-4 h-4" />
-                  Upload{files.length > 0 ? ` (${files.length})` : ''}
-                </>
-              )}
+              <Upload className="w-4 h-4" />
+              Upload{files.length > 0 ? ` (${files.length})` : ''}
             </button>
           </div>
         )}
