@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -25,21 +26,37 @@ public class FileCleanupService {
     @Scheduled(fixedDelayString = "${upload.cleanup.interval-ms:300000}")
     @Transactional
     public void cleanupExpiredPendingUploads() {
-        LocalDateTime cutoff = LocalDateTime.now().minusMinutes(20);
-        List<FileMetadata> expired =
-                fileRepository.findByUploadStatusAndUploadedAtBefore(UploadStatus.PENDING, cutoff);
+        LocalDateTime simpleCutoff = LocalDateTime.now().minusMinutes(20);
+        LocalDateTime multipartCutoff = LocalDateTime.now().minusHours(24);
 
-        if (expired.isEmpty()) return;
+        List<FileMetadata> staleSimple = fileRepository
+                .findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(UploadStatus.PENDING, simpleCutoff);
 
-        log.info("Cleaning up {} expired pending upload(s)", expired.size());
-        for (FileMetadata file : expired) {
+        List<FileMetadata> staleMultipart = fileRepository
+                .findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(UploadStatus.PENDING, multipartCutoff);
+
+        for (FileMetadata file : staleSimple) {
             try {
                 s3Service.deleteObject(file.getS3Key());
             } catch (Exception e) {
-                log.warn("Could not delete S3 object {} during cleanup: {}", file.getS3Key(), e.getMessage());
+                log.warn("S3 delete failed for {}: {}", file.getS3Key(), e.getMessage());
             }
         }
-        fileRepository.deleteAll(expired);
-        log.info("Deleted {} orphaned FileMetadata row(s)", expired.size());
+
+        for (FileMetadata file : staleMultipart) {
+            try {
+                s3Service.abortMultipartUpload(file.getS3Key(), file.getMultipartUploadId());
+            } catch (Exception e) {
+                log.warn("Abort multipart failed for {}: {}", file.getS3Key(), e.getMessage());
+            }
+        }
+
+        List<FileMetadata> all = new ArrayList<>(staleSimple);
+        all.addAll(staleMultipart);
+        if (!all.isEmpty()) {
+            fileRepository.deleteAll(all);
+            log.info("Cleaned up {} simple + {} multipart stale uploads",
+                    staleSimple.size(), staleMultipart.size());
+        }
     }
 }

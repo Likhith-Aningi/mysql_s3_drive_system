@@ -15,4 +15,10 @@ public interface FileRepository extends JpaRepository<FileMetadata, Long> {
     Optional<FileMetadata> findByIdAndOwnerId(Long id, Long ownerId);
     boolean existsByIdAndOwnerId(Long id, Long ownerId);
     List<FileMetadata> findByUploadStatusAndUploadedAtBefore(UploadStatus status, LocalDateTime cutoff);
+
+    List<FileMetadata> findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(
+            UploadStatus status, LocalDateTime cutoff);
+
+    List<FileMetadata> findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(
+            UploadStatus status, LocalDateTime cutoff);
 }

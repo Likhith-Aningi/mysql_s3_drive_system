@@ -1,8 +1,7 @@
 package com.drive.controller;
 
-import com.drive.dto.FileMetadataDto;
-import com.drive.dto.PresignedUploadRequest;
-import com.drive.dto.PresignedUploadResponse;
+import com.drive.dto.*;
+
 import com.drive.service.FileService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -66,6 +65,33 @@ public class FileController {
             @AuthenticationPrincipal UserDetails userDetails,
             @PathVariable Long id) {
         fileService.confirmUpload(userDetails.getUsername(), id);
+        return ResponseEntity.ok().build();
+    }
+
+    @PostMapping("/upload/multipart/initiate")
+    @Operation(summary = "Initiate a multipart upload — returns uploadId, s3Key, and part size")
+    public ResponseEntity<MultipartInitiateResponse> initiateMultipartUpload(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @Valid @RequestBody PresignedUploadRequest req) {
+        return ResponseEntity.ok(fileService.initiateMultipartUpload(userDetails.getUsername(), req));
+    }
+
+    @GetMapping("/{id}/part-url")
+    @Operation(summary = "Get a presigned URL for a single part upload")
+    public ResponseEntity<PartUrlResponse> getPartUrl(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @PathVariable Long id,
+            @RequestParam int partNumber) {
+        return ResponseEntity.ok(fileService.getPartPresignedUrl(userDetails.getUsername(), id, partNumber));
+    }
+
+    @PostMapping("/{id}/complete-multipart")
+    @Operation(summary = "Complete a multipart upload — assembles all parts and marks file COMPLETED")
+    public ResponseEntity<Void> completeMultipart(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @PathVariable Long id,
+            @RequestBody CompleteMultipartRequest req) {
+        fileService.completeMultipartUpload(userDetails.getUsername(), id, req);
         return ResponseEntity.ok().build();
     }
 

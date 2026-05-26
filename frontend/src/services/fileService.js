@@ -37,4 +37,33 @@ export const fileService = {
   async deleteFile(fileId) {
     await api.delete(`/files/${fileId}`)
   },
+
+  async initiateMultipartUpload(fileName, contentType, fileSize) {
+    const res = await api.post('/files/upload/multipart/initiate', { fileName, contentType, fileSize })
+    return res.data // { fileMetadataId, uploadId, s3Key, partSize }
+  },
+
+  async getPartUrl(fileMetadataId, partNumber) {
+    const res = await api.get(`/files/${fileMetadataId}/part-url`, { params: { partNumber } })
+    return res.data.uploadUrl
+  },
+
+  // Returns eTag from S3 response header — requires S3 CORS ExposeHeaders: ["ETag"]
+  async uploadPart(uploadUrl, chunk, onUploadProgress) {
+    const res = await axios.put(uploadUrl, chunk, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      onUploadProgress,
+    })
+    const eTag = res.headers['etag']
+    if (!eTag) {
+      throw new Error(
+        'S3 did not return an ETag for this part. Add "ETag" to ExposeHeaders in your S3 bucket CORS configuration.'
+      )
+    }
+    return eTag
+  },
+
+  async completeMultipartUpload(fileMetadataId, uploadId, parts) {
+    await api.post(`/files/${fileMetadataId}/complete-multipart`, { uploadId, parts })
+  },
 }

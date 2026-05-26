@@ -1,21 +1,58 @@
-import { useState, useRef } from 'react'
-import { Upload, X, CheckCircle, AlertCircle, CloudUpload } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
+import { Upload, X, CheckCircle, AlertCircle, CloudUpload, Pause, Play } from 'lucide-react'
 import { fileService } from '../../services/fileService'
+
+const FINGERPRINT = (f) => `drive-upload-${f.name}-${f.size}-${f.lastModified}`
+
+function loadSession(file) {
+  try { return JSON.parse(localStorage.getItem(FINGERPRINT(file)) || 'null') }
+  catch { return null }
+}
+
+function saveSession(file, data) {
+  localStorage.setItem(FINGERPRINT(file), JSON.stringify(data))
+}
+
+function clearSession(file) {
+  localStorage.removeItem(FINGERPRINT(file))
+}
 
 export default function UploadModal({ onClose, onSuccess }) {
   const [dragOver, setDragOver] = useState(false)
   const [files, setFiles] = useState([])
+  const [resumable, setResumable] = useState([]) // indices of files with saved sessions
   const [uploading, setUploading] = useState(false)
+  const [paused, setPaused] = useState(false)
   const [progress, setProgress] = useState([])
   const [results, setResults] = useState([])
   const inputRef = useRef()
+  const pausedRef = useRef(false)
+
+  const updateProgress = (index, patch) =>
+    setProgress((prev) => prev.map((p, i) => (i === index ? { ...p, ...patch } : p)))
+
+  const detectResumable = (fileList) => {
+    const indices = fileList
+      .map((f, i) => (loadSession(f) ? i : -1))
+      .filter((i) => i >= 0)
+    setResumable(indices)
+  }
 
   const addFiles = (selected) => {
-    setFiles((prev) => [...prev, ...Array.from(selected)])
+    const arr = Array.from(selected)
+    setFiles((prev) => {
+      const next = [...prev, ...arr]
+      detectResumable(next)
+      return next
+    })
   }
 
   const removeFile = (index) => {
-    setFiles((prev) => prev.filter((_, i) => i !== index))
+    setFiles((prev) => {
+      const next = prev.filter((_, i) => i !== index)
+      detectResumable(next)
+      return next
+    })
   }
 
   const handleDrop = (e) => {
@@ -23,9 +60,6 @@ export default function UploadModal({ onClose, onSuccess }) {
     setDragOver(false)
     addFiles(e.dataTransfer.files)
   }
-
-  const updateProgress = (index, patch) =>
-    setProgress((prev) => prev.map((p, i) => (i === index ? { ...p, ...patch } : p)))
 
   const classifyUploadError = (err) => {
     if (!err?.response) return 'Network error — check your connection and try again'
@@ -36,52 +70,116 @@ export default function UploadModal({ onClose, onSuccess }) {
     return `Upload failed (error ${status})`
   }
 
+  const uploadFileMultipart = async (file, idx) => {
+    let session = loadSession(file)
+    let { fileMetadataId, uploadId, partSize, totalParts, completedParts } = session ?? {}
+
+    if (!session) {
+      const init = await fileService.initiateMultipartUpload(
+        file.name,
+        file.type || 'application/octet-stream',
+        file.size
+      )
+      fileMetadataId = init.fileMetadataId
+      uploadId = init.uploadId
+      partSize = init.partSize
+      totalParts = Math.ceil(file.size / partSize)
+      completedParts = []
+      saveSession(file, { fileMetadataId, uploadId, s3Key: init.s3Key, partSize, totalParts, completedParts })
+    }
+
+    const doneSet = new Set(completedParts.map((p) => p.partNumber))
+
+    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
+      if (doneSet.has(partNumber)) continue
+
+      if (pausedRef.current) return 'paused'
+
+      const start = (partNumber - 1) * partSize
+      const chunk = file.slice(start, start + partSize)
+
+      const uploadUrl = await fileService.getPartUrl(fileMetadataId, partNumber)
+      const eTag = await fileService.uploadPart(uploadUrl, chunk, (e) => {
+        const partsDone = completedParts.length
+        const partProgress = e.total > 0 ? e.loaded / e.total : 0
+        const overall = ((partsDone + partProgress) / totalParts) * 100
+        updateProgress(idx, { loaded: Math.round(overall), total: 100 })
+      })
+
+      completedParts = [...completedParts, { partNumber, eTag }]
+      saveSession(file, { fileMetadataId, uploadId, partSize, totalParts, completedParts })
+    }
+
+    updateProgress(idx, { loaded: 100, total: 100, phase: 'confirming' })
+    await fileService.completeMultipartUpload(fileMetadataId, uploadId, completedParts)
+    clearSession(file)
+    return 'done'
+  }
+
   const handleUpload = async () => {
     if (!files.length) return
+    pausedRef.current = false
+    setPaused(false)
     setUploading(true)
-    setProgress(files.map((f) => ({ loaded: 0, total: f.size, phase: 'waiting' })))
+    setProgress(files.map(() => ({ loaded: 0, total: 100, phase: 'waiting' })))
     const newResults = []
 
     for (let idx = 0; idx < files.length; idx++) {
       const file = files[idx]
-      updateProgress(idx, { phase: 'uploading' })
-      let fileMetadataId = null
+
+      // Skip files that already finished in this session
+      if (newResults[idx]?.success) continue
+
+      updateProgress(idx, { phase: 'uploading', loaded: 0, total: 100 })
+
       try {
-        const { uploadUrl, fileMetadataId: id } = await fileService.initiateUpload(
-          file.name,
-          file.type || 'application/octet-stream',
-          file.size
-        )
-        fileMetadataId = id
+        const outcome = await uploadFileMultipart(file, idx)
 
-        await fileService.uploadToS3(uploadUrl, file, (e) => {
-          updateProgress(idx, { loaded: e.loaded, total: e.total || file.size })
-        })
-
-        updateProgress(idx, { loaded: file.size, total: file.size, phase: 'confirming' })
-
-        try {
-          await fileService.confirmUpload(fileMetadataId)
-        } catch {
-          updateProgress(idx, { phase: 'error' })
-          newResults.push({ name: file.name, success: false, reason: 'Upload may not have completed — it will be cleaned up automatically' })
-          continue
+        if (outcome === 'paused') {
+          // Mark remaining files as waiting; stop loop
+          for (let j = idx; j < files.length; j++) {
+            updateProgress(j, { phase: 'waiting' })
+          }
+          break
         }
 
         updateProgress(idx, { phase: 'done' })
-        newResults.push({ name: file.name, success: true })
+        newResults[idx] = { name: file.name, success: true }
       } catch (err) {
         updateProgress(idx, { phase: 'error' })
-        newResults.push({ name: file.name, success: false, reason: classifyUploadError(err) })
+        newResults[idx] = { name: file.name, success: false, reason: classifyUploadError(err) }
       }
     }
 
-    setResults(newResults)
     setUploading(false)
-    if (newResults.every((r) => r.success)) {
+
+    const allDone = newResults.length === files.length && newResults.every((r) => r?.success)
+    if (allDone) {
+      setResults(newResults)
       setTimeout(onSuccess, 800)
+    } else if (!pausedRef.current) {
+      // At least one error; show results
+      const filled = files.map((f, i) => newResults[i] ?? { name: f.name, success: false, reason: 'Not attempted' })
+      setResults(filled)
     }
+    // If paused, keep uploading=false and paused=true; user can resume
   }
+
+  const handlePause = () => {
+    pausedRef.current = true
+    setPaused(true)
+  }
+
+  const handleResume = () => {
+    handleUpload()
+  }
+
+  // Re-detect resumable when files change
+  useEffect(() => {
+    detectResumable(files)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resumableCount = resumable.length
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
@@ -98,38 +196,53 @@ export default function UploadModal({ onClose, onSuccess }) {
         </div>
 
         <div className="p-5 space-y-4">
-          {uploading ? (
-            <ul className="space-y-3">
-              {files.map((f, i) => {
-                const p = progress[i] ?? { loaded: 0, total: f.size, phase: 'waiting' }
-                const pct = p.total > 0 ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
-                const done = p.phase === 'done'
-                const error = p.phase === 'error'
-                const confirming = p.phase === 'confirming'
-                return (
-                  <li key={i} className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2 text-sm">
-                      <span className="truncate text-gray-700 dark:text-gray-200 flex-1">{f.name}</span>
-                      <span className={`flex-shrink-0 text-xs font-medium tabular-nums ${
-                        done ? 'text-green-500' : error ? 'text-red-500' : 'text-gray-400 dark:text-gray-500'
-                      }`}>
-                        {done ? 'Done' : error ? 'Failed' : confirming ? 'Saving…' : `${pct}%`}
-                      </span>
-                    </div>
-                    <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full transition-all duration-150 ${
-                          done ? 'bg-green-500' : error ? 'bg-red-500' : 'bg-blue-500'
-                        }`}
-                        style={{ width: `${done || confirming ? 100 : pct}%` }}
-                      />
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
+          {uploading || paused ? (
+            <>
+              {paused && (
+                <p className="text-xs text-yellow-600 dark:text-yellow-400 font-medium">
+                  Upload paused — progress is saved. Click Resume to continue.
+                </p>
+              )}
+              <ul className="space-y-3">
+                {files.map((f, i) => {
+                  const p = progress[i] ?? { loaded: 0, total: 100, phase: 'waiting' }
+                  const pct = p.total > 0 ? Math.min(100, Math.round((p.loaded / p.total) * 100)) : 0
+                  const done = p.phase === 'done'
+                  const error = p.phase === 'error'
+                  const confirming = p.phase === 'confirming'
+                  const waiting = p.phase === 'waiting'
+                  return (
+                    <li key={i} className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 text-sm">
+                        <span className="truncate text-gray-700 dark:text-gray-200 flex-1">{f.name}</span>
+                        <span className={`flex-shrink-0 text-xs font-medium tabular-nums ${
+                          done ? 'text-green-500' : error ? 'text-red-500' : waiting ? 'text-gray-400' : 'text-gray-400 dark:text-gray-500'
+                        }`}>
+                          {done ? 'Done' : error ? 'Failed' : confirming ? 'Saving…' : waiting ? 'Waiting' : `${pct}%`}
+                        </span>
+                      </div>
+                      <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-150 ${
+                            done ? 'bg-green-500' : error ? 'bg-red-500' : waiting ? 'bg-gray-300' : 'bg-blue-500'
+                          }`}
+                          style={{ width: `${done || confirming ? 100 : pct}%` }}
+                        />
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </>
           ) : results.length === 0 ? (
             <>
+              {resumableCount > 0 && (
+                <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 rounded-lg px-3 py-2">
+                  {resumableCount === 1
+                    ? '1 file has a previous upload in progress — it will resume from where it left off.'
+                    : `${resumableCount} files have previous uploads in progress — they will resume automatically.`}
+                </div>
+              )}
               <div
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
                 onDragLeave={() => setDragOver(false)}
@@ -161,6 +274,9 @@ export default function UploadModal({ onClose, onSuccess }) {
                       className="flex items-center justify-between text-sm bg-gray-50 dark:bg-gray-700 rounded-lg px-3 py-2"
                     >
                       <span className="truncate text-gray-700 dark:text-gray-200 flex-1 mr-2">{f.name}</span>
+                      {resumable.includes(i) && (
+                        <span className="text-xs text-blue-500 mr-2 flex-shrink-0">resuming</span>
+                      )}
                       <button
                         onClick={() => removeFile(i)}
                         className="text-gray-400 hover:text-red-500 flex-shrink-0"
@@ -193,7 +309,37 @@ export default function UploadModal({ onClose, onSuccess }) {
           )}
         </div>
 
-        {!uploading && results.length === 0 && (
+        {uploading && (
+          <div className="px-5 pb-5">
+            <button
+              onClick={handlePause}
+              className="w-full flex items-center justify-center gap-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-4 py-2.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-sm font-medium transition-colors"
+            >
+              <Pause className="w-4 h-4" />
+              Pause
+            </button>
+          </div>
+        )}
+
+        {paused && (
+          <div className="px-5 pb-5 flex gap-2">
+            <button
+              onClick={onClose}
+              className="flex-1 px-4 py-2.5 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 text-sm font-medium transition-colors"
+            >
+              Close
+            </button>
+            <button
+              onClick={handleResume}
+              className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 text-sm font-medium transition-colors"
+            >
+              <Play className="w-4 h-4" />
+              Resume
+            </button>
+          </div>
+        )}
+
+        {!uploading && !paused && results.length === 0 && (
           <div className="px-5 pb-5 flex gap-2">
             <button
               onClick={onClose}

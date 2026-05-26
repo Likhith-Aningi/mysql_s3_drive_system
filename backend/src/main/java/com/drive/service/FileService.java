@@ -1,17 +1,17 @@
 package com.drive.service;
 
-import com.drive.dto.FileMetadataDto;
-import com.drive.dto.PresignedUploadRequest;
-import com.drive.dto.PresignedUploadResponse;
+import com.drive.dto.*;
 import com.drive.entity.FileMetadata;
 import com.drive.entity.UploadStatus;
 import com.drive.entity.User;
 import com.drive.repository.FileRepository;
 import com.drive.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
 
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -19,6 +19,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class FileService {
 
     private final FileRepository fileRepository;
@@ -49,6 +50,66 @@ public class FileService {
         FileMetadata saved = fileRepository.save(metadata);
 
         return new PresignedUploadResponse(uploadUrl, s3Key, saved.getId());
+    }
+
+    public MultipartInitiateResponse initiateMultipartUpload(String userEmail, PresignedUploadRequest request) {
+        User owner = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new NoSuchElementException("User not found"));
+
+        String s3Key = "users/" + owner.getId() + "/" + UUID.randomUUID() + "/" + request.getFileName();
+        String uploadId = s3Service.initiateMultipartUpload(s3Key, request.getContentType());
+
+        String cloudfrontUrl = cloudfrontBaseUrl.isBlank() ? null
+                : cloudfrontBaseUrl.stripTrailing() + "/" + s3Key;
+
+        FileMetadata metadata = FileMetadata.builder()
+                .originalName(request.getFileName())
+                .s3Key(s3Key)
+                .contentType(request.getContentType())
+                .fileSize(request.getFileSize())
+                .cloudfrontUrl(cloudfrontUrl)
+                .multipartUploadId(uploadId)
+                .owner(owner)
+                .build();
+        FileMetadata saved = fileRepository.save(metadata);
+
+        return new MultipartInitiateResponse(saved.getId(), uploadId, s3Key, 5L * 1024 * 1024);
+    }
+
+    public PartUrlResponse getPartPresignedUrl(String userEmail, Long fileId, int partNumber) {
+        User owner = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new NoSuchElementException("User not found"));
+        FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
+                .orElseThrow(() -> new NoSuchElementException("File not found"));
+        if (file.getMultipartUploadId() == null) {
+            throw new IllegalStateException("Not a multipart upload");
+        }
+        String url = s3Service.generatePartPresignedUrl(file.getS3Key(), file.getMultipartUploadId(), partNumber);
+        return new PartUrlResponse(url);
+    }
+
+    @Transactional
+    public void completeMultipartUpload(String userEmail, Long fileId, CompleteMultipartRequest req) {
+        User owner = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new NoSuchElementException("User not found"));
+        FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
+                .orElseThrow(() -> new NoSuchElementException("File not found"));
+
+        boolean hasBlankETag = req.getParts().stream()
+                .anyMatch(p -> p.getETag() == null || p.getETag().isBlank());
+        if (hasBlankETag) {
+            throw new IllegalStateException(
+                    "One or more parts have a missing ETag — add 'ETag' to ExposeHeaders in your S3 bucket CORS configuration");
+        }
+
+        List<CompletedPart> parts = req.getParts().stream()
+                .map(p -> CompletedPart.builder().partNumber(p.getPartNumber()).eTag(p.getETag()).build())
+                .toList();
+
+        s3Service.completeMultipartUpload(file.getS3Key(), req.getUploadId(), parts);
+        file.setUploadStatus(UploadStatus.COMPLETED);
+        file.setMultipartUploadId(null);
+        fileRepository.save(file);
     }
 
     @Transactional
@@ -114,6 +175,13 @@ public class FileService {
                 .orElseThrow(() -> new NoSuchElementException("User not found"));
         FileMetadata file = fileRepository.findByIdAndOwnerId(fileId, owner.getId())
                 .orElseThrow(() -> new NoSuchElementException("File not found"));
+        if (file.getMultipartUploadId() != null) {
+            try {
+                s3Service.abortMultipartUpload(file.getS3Key(), file.getMultipartUploadId());
+            } catch (Exception e) {
+                log.warn("Abort multipart failed for {}: {}", file.getS3Key(), e.getMessage());
+            }
+        }
         s3Service.deleteObject(file.getS3Key());
         fileRepository.delete(file);
     }

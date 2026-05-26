@@ -1,8 +1,6 @@
 package com.drive.service;
 
-import com.drive.dto.FileMetadataDto;
-import com.drive.dto.PresignedUploadRequest;
-import com.drive.dto.PresignedUploadResponse;
+import com.drive.dto.*;
 import com.drive.entity.FileMetadata;
 import com.drive.entity.UploadStatus;
 import com.drive.entity.User;
@@ -24,8 +22,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -54,6 +51,8 @@ class FileServiceTest {
                 .uploadedAt(LocalDateTime.now())
                 .build();
     }
+
+    // ── simple upload ──────────────────────────────────────────────────────────
 
     @Test
     void initiateUpload_success() {
@@ -120,6 +119,170 @@ class FileServiceTest {
                 .isInstanceOf(NoSuchElementException.class);
     }
 
+    // ── multipart initiate ─────────────────────────────────────────────────────
+
+    @Test
+    void initiateMultipartUpload_success() {
+        PresignedUploadRequest req = new PresignedUploadRequest();
+        req.setFileName("video.mp4");
+        req.setContentType("video/mp4");
+        req.setFileSize(50 * 1024 * 1024L);
+
+        FileMetadata saved = FileMetadata.builder()
+                .id(20L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50 * 1024 * 1024L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(s3Service.initiateMultipartUpload(anyString(), anyString())).thenReturn("upload-id-123");
+        when(fileRepository.save(any())).thenReturn(saved);
+
+        MultipartInitiateResponse resp = fileService.initiateMultipartUpload("alice@example.com", req);
+
+        assertThat(resp.getFileMetadataId()).isEqualTo(20L);
+        assertThat(resp.getUploadId()).isEqualTo("upload-id-123");
+        assertThat(resp.getPartSize()).isEqualTo(5L * 1024 * 1024);
+
+        ArgumentCaptor<FileMetadata> captor = ArgumentCaptor.forClass(FileMetadata.class);
+        verify(fileRepository).save(captor.capture());
+        assertThat(captor.getValue().getMultipartUploadId()).isEqualTo("upload-id-123");
+        assertThat(captor.getValue().getUploadStatus()).isEqualTo(UploadStatus.PENDING);
+    }
+
+    @Test
+    void initiateMultipartUpload_userNotFound_throws() {
+        PresignedUploadRequest req = new PresignedUploadRequest();
+        req.setFileName("video.mp4");
+        req.setContentType("video/mp4");
+        req.setFileSize(1024L);
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> fileService.initiateMultipartUpload("alice@example.com", req))
+                .isInstanceOf(NoSuchElementException.class);
+    }
+
+    // ── multipart part URL ─────────────────────────────────────────────────────
+
+    @Test
+    void getPartPresignedUrl_success() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+        when(s3Service.generatePartPresignedUrl("users/1/uuid/video.mp4", "upload-id-123", 1))
+                .thenReturn("https://s3.part.url");
+
+        PartUrlResponse resp = fileService.getPartPresignedUrl("alice@example.com", 10L, 1);
+
+        assertThat(resp.getUploadUrl()).isEqualTo("https://s3.part.url");
+    }
+
+    @Test
+    void getPartPresignedUrl_notMultipartUpload_throws() {
+        // file.multipartUploadId is null — it was a simple upload
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(file));
+
+        assertThatThrownBy(() -> fileService.getPartPresignedUrl("alice@example.com", 10L, 1))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("multipart");
+    }
+
+    @Test
+    void getPartPresignedUrl_fileNotFound_throws() {
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(99L, 1L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> fileService.getPartPresignedUrl("alice@example.com", 99L, 1))
+                .isInstanceOf(NoSuchElementException.class);
+    }
+
+    // ── multipart complete ─────────────────────────────────────────────────────
+
+    @Test
+    void completeMultipartUpload_success() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, "\"abc123\"");
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+        when(fileRepository.save(any())).thenReturn(multipartFile);
+
+        fileService.completeMultipartUpload("alice@example.com", 10L, req);
+
+        verify(s3Service).completeMultipartUpload(
+                eq("users/1/uuid/video.mp4"), eq("upload-id-123"), any());
+
+        ArgumentCaptor<FileMetadata> captor = ArgumentCaptor.forClass(FileMetadata.class);
+        verify(fileRepository).save(captor.capture());
+        assertThat(captor.getValue().getUploadStatus()).isEqualTo(UploadStatus.COMPLETED);
+        assertThat(captor.getValue().getMultipartUploadId()).isNull();
+    }
+
+    @Test
+    void completeMultipartUpload_nullETag_throws() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, null);
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+
+        assertThatThrownBy(() -> fileService.completeMultipartUpload("alice@example.com", 10L, req))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ETag");
+
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void completeMultipartUpload_blankETag_throws() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, "");
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+
+        assertThatThrownBy(() -> fileService.completeMultipartUpload("alice@example.com", 10L, req))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ETag");
+
+        verifyNoInteractions(s3Service);
+    }
+
+    @Test
+    void completeMultipartUpload_fileNotFound_throws() {
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, "\"abc\"");
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(99L, 1L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> fileService.completeMultipartUpload("alice@example.com", 99L, req))
+                .isInstanceOf(NoSuchElementException.class);
+    }
+
+    // ── list / download / share ────────────────────────────────────────────────
+
     @Test
     void listFiles_returnsFilesForOwner() {
         when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
@@ -184,6 +347,8 @@ class FileServiceTest {
         assertThat(url).isEqualTo("https://cdn.example.com/users/1/uuid/test.pdf");
     }
 
+    // ── delete ─────────────────────────────────────────────────────────────────
+
     @Test
     void deleteFile_success() {
         when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
@@ -208,11 +373,59 @@ class FileServiceTest {
     }
 
     @Test
+    void deleteFile_multipart_abortsBeforeDelete() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+
+        fileService.deleteFile("alice@example.com", 10L);
+
+        verify(s3Service).abortMultipartUpload("users/1/uuid/video.mp4", "upload-id-123");
+        verify(s3Service).deleteObject("users/1/uuid/video.mp4");
+        verify(fileRepository).delete(multipartFile);
+    }
+
+    @Test
+    void deleteFile_multipartAbortFails_stillDeletes() {
+        FileMetadata multipartFile = FileMetadata.builder()
+                .id(10L).s3Key("users/1/uuid/video.mp4").originalName("video.mp4")
+                .contentType("video/mp4").fileSize(50L)
+                .multipartUploadId("upload-id-123").uploadStatus(UploadStatus.PENDING)
+                .owner(user).build();
+
+        when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
+        when(fileRepository.findByIdAndOwnerId(10L, 1L)).thenReturn(Optional.of(multipartFile));
+        doThrow(new RuntimeException("S3 abort failed")).when(s3Service).abortMultipartUpload(any(), any());
+
+        fileService.deleteFile("alice@example.com", 10L);
+
+        verify(s3Service).deleteObject("users/1/uuid/video.mp4");
+        verify(fileRepository).delete(multipartFile);
+    }
+
+    @Test
     void deleteFile_notOwner_throws() {
         when(userRepository.findByEmail("alice@example.com")).thenReturn(Optional.of(user));
         when(fileRepository.findByIdAndOwnerId(99L, 1L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> fileService.deleteFile("alice@example.com", 99L))
                 .isInstanceOf(NoSuchElementException.class);
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    private CompleteMultipartRequest buildCompleteRequest(String uploadId, int partNumber, String eTag) {
+        CompleteMultipartRequest req = new CompleteMultipartRequest();
+        req.setUploadId(uploadId);
+        CompleteMultipartRequest.PartInfo part = new CompleteMultipartRequest.PartInfo();
+        part.setPartNumber(partNumber);
+        part.setETag(eTag);
+        req.setParts(List.of(part));
+        return req;
     }
 }

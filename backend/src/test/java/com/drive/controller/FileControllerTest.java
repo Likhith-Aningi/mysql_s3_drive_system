@@ -1,8 +1,6 @@
 package com.drive.controller;
 
-import com.drive.dto.FileMetadataDto;
-import com.drive.dto.PresignedUploadRequest;
-import com.drive.dto.PresignedUploadResponse;
+import com.drive.dto.*;
 import com.drive.service.FileService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -17,9 +15,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.NoSuchElementException;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -33,6 +29,8 @@ class FileControllerTest {
     @MockitoBean FileService fileService;
     @MockitoBean com.drive.security.JwtUtil jwtUtil;
     @MockitoBean org.springframework.security.core.userdetails.UserDetailsService userDetailsService;
+
+    // ── simple upload ──────────────────────────────────────────────────────────
 
     @Test
     @WithMockUser(username = "alice@example.com")
@@ -53,6 +51,138 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.uploadUrl").value("https://s3.url"))
                 .andExpect(jsonPath("$.fileMetadataId").value(1));
     }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void initiateUpload_missingFileName_returns400() throws Exception {
+        PresignedUploadRequest req = new PresignedUploadRequest();
+        // fileName missing
+        req.setContentType("application/pdf");
+        req.setFileSize(1024L);
+
+        mockMvc.perform(post("/api/files/upload/initiate")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+    }
+
+    // ── multipart initiate ─────────────────────────────────────────────────────
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void initiateMultipartUpload_success() throws Exception {
+        PresignedUploadRequest req = new PresignedUploadRequest();
+        req.setFileName("video.mp4");
+        req.setContentType("video/mp4");
+        req.setFileSize(50 * 1024 * 1024L);
+
+        when(fileService.initiateMultipartUpload(anyString(), any()))
+                .thenReturn(new MultipartInitiateResponse(1L, "upload-id-123",
+                        "users/1/uuid/video.mp4", 5L * 1024 * 1024));
+
+        mockMvc.perform(post("/api/files/upload/multipart/initiate")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.fileMetadataId").value(1))
+                .andExpect(jsonPath("$.uploadId").value("upload-id-123"))
+                .andExpect(jsonPath("$.partSize").value(5 * 1024 * 1024));
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void initiateMultipartUpload_invalidFileSize_returns400() throws Exception {
+        PresignedUploadRequest req = new PresignedUploadRequest();
+        req.setFileName("video.mp4");
+        req.setContentType("video/mp4");
+        req.setFileSize(0L); // fileSize must be > 0
+
+        mockMvc.perform(post("/api/files/upload/multipart/initiate")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+    }
+
+    // ── part URL ───────────────────────────────────────────────────────────────
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void getPartUrl_success() throws Exception {
+        when(fileService.getPartPresignedUrl("alice@example.com", 1L, 2))
+                .thenReturn(new PartUrlResponse("https://s3.part.url"));
+
+        mockMvc.perform(get("/api/files/1/part-url").param("partNumber", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.uploadUrl").value("https://s3.part.url"));
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void getPartUrl_notMultipartUpload_returns400() throws Exception {
+        when(fileService.getPartPresignedUrl(anyString(), eq(1L), anyInt()))
+                .thenThrow(new IllegalStateException("Not a multipart upload"));
+
+        mockMvc.perform(get("/api/files/1/part-url").param("partNumber", "1"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void getPartUrl_fileNotFound_returns404() throws Exception {
+        when(fileService.getPartPresignedUrl(anyString(), eq(99L), anyInt()))
+                .thenThrow(new NoSuchElementException("File not found"));
+
+        mockMvc.perform(get("/api/files/99/part-url").param("partNumber", "1"))
+                .andExpect(status().isNotFound());
+    }
+
+    // ── complete multipart ─────────────────────────────────────────────────────
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void completeMultipart_success() throws Exception {
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, "\"abc123\"");
+        doNothing().when(fileService).completeMultipartUpload(anyString(), eq(1L), any());
+
+        mockMvc.perform(post("/api/files/1/complete-multipart")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void completeMultipart_missingETag_returns400() throws Exception {
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, null);
+        doThrow(new IllegalStateException("One or more parts have a missing ETag"))
+                .when(fileService).completeMultipartUpload(anyString(), eq(1L), any());
+
+        mockMvc.perform(post("/api/files/1/complete-multipart")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @WithMockUser(username = "alice@example.com")
+    void completeMultipart_fileNotFound_returns404() throws Exception {
+        CompleteMultipartRequest req = buildCompleteRequest("upload-id-123", 1, "\"abc\"");
+        doThrow(new NoSuchElementException("File not found"))
+                .when(fileService).completeMultipartUpload(anyString(), eq(99L), any());
+
+        mockMvc.perform(post("/api/files/99/complete-multipart")
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(req)))
+                .andExpect(status().isNotFound());
+    }
+
+    // ── list / download / share ────────────────────────────────────────────────
 
     @Test
     @WithMockUser(username = "alice@example.com")
@@ -99,6 +229,8 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.url").value("https://cdn.example.com/file"))
                 .andExpect(jsonPath("$.linkType").value("permanent"));
     }
+
+    // ── confirm / delete ───────────────────────────────────────────────────────
 
     @Test
     @WithMockUser(username = "alice@example.com")
@@ -152,5 +284,17 @@ class FileControllerTest {
     void listFiles_unauthenticated_returns401() throws Exception {
         mockMvc.perform(get("/api/files"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    private CompleteMultipartRequest buildCompleteRequest(String uploadId, int partNumber, String eTag) {
+        CompleteMultipartRequest req = new CompleteMultipartRequest();
+        req.setUploadId(uploadId);
+        CompleteMultipartRequest.PartInfo part = new CompleteMultipartRequest.PartInfo();
+        part.setPartNumber(partNumber);
+        part.setETag(eTag);
+        req.setParts(List.of(part));
+        return req;
     }
 }

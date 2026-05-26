@@ -34,6 +34,9 @@ public class FileMetadata {
     @Column
     private String cloudfrontUrl;
 
+    @Column
+    private String multipartUploadId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20, columnDefinition = "VARCHAR(20) DEFAULT 'PENDING'")
     @Builder.Default

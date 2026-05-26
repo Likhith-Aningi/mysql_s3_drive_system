@@ -30,12 +30,23 @@ class FileCleanupServiceTest {
                 .owner(owner).build();
     }
 
+    private FileMetadata pendingMultipartFile(Long id, String s3Key, String uploadId) {
+        User owner = User.builder().id(1L).email("x@x.com").name("X").build();
+        return FileMetadata.builder()
+                .id(id).s3Key(s3Key).uploadStatus(UploadStatus.PENDING)
+                .originalName("file.mp4").contentType("video/mp4").fileSize(100L)
+                .multipartUploadId(uploadId)
+                .owner(owner).build();
+    }
+
     @Test
-    void cleanup_deletesExpiredPendingRows() {
+    void cleanup_deletesExpiredSimplePendingRows() {
         FileMetadata f1 = pendingFile(1L, "key1");
         FileMetadata f2 = pendingFile(2L, "key2");
-        when(fileRepository.findByUploadStatusAndUploadedAtBefore(eq(UploadStatus.PENDING), any()))
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(any(), any()))
                 .thenReturn(List.of(f1, f2));
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(any(), any()))
+                .thenReturn(List.of());
 
         fileCleanupService.cleanupExpiredPendingUploads();
 
@@ -45,8 +56,25 @@ class FileCleanupServiceTest {
     }
 
     @Test
+    void cleanup_abortsExpiredMultipartPendingRows() {
+        FileMetadata f1 = pendingMultipartFile(1L, "key1", "upload-id-1");
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(any(), any()))
+                .thenReturn(List.of());
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(any(), any()))
+                .thenReturn(List.of(f1));
+
+        fileCleanupService.cleanupExpiredPendingUploads();
+
+        verify(s3Service).abortMultipartUpload("key1", "upload-id-1");
+        verifyNoMoreInteractions(s3Service);
+        verify(fileRepository).deleteAll(List.of(f1));
+    }
+
+    @Test
     void cleanup_nothingExpired_noDeletes() {
-        when(fileRepository.findByUploadStatusAndUploadedAtBefore(any(), any()))
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(any(), any()))
+                .thenReturn(List.of());
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(any(), any()))
                 .thenReturn(List.of());
 
         fileCleanupService.cleanupExpiredPendingUploads();
@@ -58,8 +86,10 @@ class FileCleanupServiceTest {
     @Test
     void cleanup_s3DeleteFails_stillDeletesDbRow() {
         FileMetadata f1 = pendingFile(1L, "missing-key");
-        when(fileRepository.findByUploadStatusAndUploadedAtBefore(any(), any()))
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNullAndUploadedAtBefore(any(), any()))
                 .thenReturn(List.of(f1));
+        when(fileRepository.findByUploadStatusAndMultipartUploadIdIsNotNullAndUploadedAtBefore(any(), any()))
+                .thenReturn(List.of());
         doThrow(new RuntimeException("S3 error")).when(s3Service).deleteObject("missing-key");
 
         fileCleanupService.cleanupExpiredPendingUploads();
